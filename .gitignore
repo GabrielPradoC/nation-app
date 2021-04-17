@@ -1,0 +1,4 @@
+node_modules
+package*
+test.mjs
+.vscode

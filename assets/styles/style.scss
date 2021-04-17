@@ -1,0 +1,161 @@
+$margin-btns: 250px;
+@import "navbar";
+@import "flag";
+@import "btns-page";
+@import "vars";
+
+html{
+    background-color: white;
+    font-family: Arial, Helvetica, sans-serif;
+}
+
+.search-btn {
+	background-color: $main-color;
+	border-radius: 6px;
+	color: white;
+	border: none;
+	outline: none;
+	padding: 8px 30px;
+    margin-bottom: 8px;
+	&:active {
+		border: 1px solid $main-color;
+		background-color: white;
+		color: $main-color;
+	}
+}
+
+.content{
+    display: flex;
+    flex-direction: column;
+    margin: 100px auto;
+    margin-bottom: 0;
+    height: 840px;
+    max-height: 840px;
+    align-items: center;
+}
+
+.flags-display{
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-evenly;
+    flex-direction: row;
+    flex-wrap: wrap;
+    height: 85%;
+    width: 85%;
+    box-sizing: border-box;
+}
+
+.btns {
+	display: flex;
+	padding: 22px 0;
+	flex-direction: row;
+	align-items: center;
+	padding-left: 30px;
+	justify-content: space-around;
+	.btn-select {
+		h5 {
+			margin: -15px 0 0 0;
+			color: $main-color;
+			font-size: medium;
+			font-weight: 600;
+		}
+		select {
+			padding: 5px 2px;
+			border: none;
+			width: 150px;
+			background-color: transparent;
+			outline: none;
+			border-bottom: 1px solid grey;
+			color: grey;
+			font-weight: bold;
+			option {
+				border: none;
+				font-weight: bold;
+			}
+		}
+		&:nth-of-type(2) {
+			margin-left: $margin-btns;
+		}
+	}
+	.search-btn-div {
+		display: flex;
+		margin-left: $margin-btns;
+		justify-content: flex-end;
+		button {
+			font-size: small;
+            font-weight: 500;
+		}
+	}
+	width: 50%;
+	flex-direction: row;
+}
+
+.hide {
+	display: none;
+}
+
+.show {
+	display: block;
+}
+
+@media only screen and (max-width: 768px){
+    .content{
+        max-width: 90%;
+        height: max-content;
+        margin-top: 130px;
+        max-height: 17500px;
+    }
+
+    .btns{
+        display: flex;
+        width: 100%;
+        padding-left: 0;
+        flex-direction: column;
+        justify-content: center;
+        margin-bottom: 15px;
+        padding-bottom: 0;
+        .btn-select{
+            width: 100%;
+            &:first-child{
+                margin-bottom: 40px;
+            }
+            h5{
+                font-weight: normal;
+                
+            }
+            select{
+                width: 100%;
+                font-weight: normal;
+                option{
+                    max-width: 100%;
+                    overflow: hidden;
+                    font-weight: bold;
+                }
+            }
+            &:nth-of-type(2){
+                margin-left: 0;
+                margin-bottom: 23px;
+            }
+        }
+        .search-btn-div{
+            margin-left: 0;
+            align-self: flex-end;
+            width: 45%;
+            button{
+                border-radius: 10px;
+                font-weight: 200;
+                font-size: normal;
+                padding: 4px 35px;
+                height: 35px;
+            }
+        }
+    }
+    .flags-display{
+        flex-direction: column;
+        flex-wrap: nowrap;
+        align-items: center;
+        justify-content: space-between;
+        height: auto;
+        width: 100%;
+    }
+}

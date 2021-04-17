@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<link rel="stylesheet" href="./assets/styles/style.css" />
+		<title>Nation App</title>
+	</head>
+	<body>
+		<div class="navbar">
+			<a href="https://mova.vc/" target="_blank">
+				<img src="https://mova.vc/img/footer_mova.svg" alt="logo da empresa" />
+			</a>
+		</div>
+		<div class="content">
+			<div class="btns">
+				<div class="btn-select">
+					<h5>Filtrar por</h5>
+					<select name="options" id="select-search">
+						<option value="name">País</option>
+						<option value="region">Região</option>
+						<option value="capital">Capital</option>
+						<option value="lang">Língua</option>
+						<option value="callingcode">Código de ligação</option>
+					</select>
+				</div>
+				<div class="2filter btn-select hide">
+					<h5 id="txt"></h5>
+					<select name="2filter-options" id="2filter-options"></select>
+				</div>
+				<div class="search-btn-div">
+					<button class="search-btn" id="search-btn">PESQUISAR</button>
+				</div>
+			</div>
+			<div class="flags-display"></div>
+			<div class="btns-page"></div>
+		</div>
+		<script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+		<script src="./assets/scripts/script.js" type="module"></script>
+		<script
+			src="https://code.jquery.com/jquery-3.6.0.min.js"
+			integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4="
+			crossorigin="anonymous"
+		></script>
+	</body>
+</html>
