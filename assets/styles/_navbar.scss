@@ -12,11 +12,6 @@
     left: 0;
     margin-bottom: 100px;
     background-color: white;
-    a img{
-        height: 80%;
-        max-width: 70px;
-        margin-left: 40px;
-    }
 }
 
 @media only screen and (max-width: 768px){
@@ -32,11 +27,6 @@
             span{
                 display: none;
             }
-        }
-        a img{
-            height: 90%;
-            max-width: 100px;
-            margin-left: 20px;
         }
     }
 }
