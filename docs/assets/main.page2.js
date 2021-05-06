@@ -1940,7 +1940,6 @@ function renderPagingBtns(arr) {
 	const btn = document.createElement("button");
 	const btnPrev = btn.cloneNode();
 	const btnNext = btn.cloneNode();
-    const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
 	btnNext.id = "next";
 	btnPrev.id = "prev";
 	btnNext.innerText = "˃";
@@ -1951,9 +1950,6 @@ function renderPagingBtns(arr) {
 			it.classList.toggle("active");
 			globalThis.activeBtn = it;
 		}
-        if(ind > 3 && ind < arr.length-1 && vw < 380){
-            it.classList.add('hide');
-        }
 		pagesDiv.appendChild(it);
 	});
 	pagesDiv.appendChild(btnNext);
