@@ -82,12 +82,12 @@
   background-color: #6d2080;
 }
 
-.btns-page .next-arrow {
+.btns-page #next {
   height: 24px;
   width: 24px;
 }
 
-.btns-page .prev-arrow {
+.btns-page #prev {
   height: 24px;
   width: 24px;
 }
