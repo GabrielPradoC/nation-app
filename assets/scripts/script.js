@@ -23,50 +23,55 @@ window.addEventListener("load", () => {
 });
 
 pagesDiv.addEventListener("click", (ev) => {
+	if(ev.target.tagName !== 'BUTTON') return;
 	if (!/[0-9]/.test(ev.target.value)) {
 		if (ev.target.id == "next") {
 			changeGlobalActiveBtn("next");
 		} else {
 			changeGlobalActiveBtn("prev");
 		}
+		fixPagination();
 		return;
 	}
-    const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
 	globalThis.activeBtn.classList.toggle("active");
 	globalThis.activeBtn = ev.target;
 	globalThis.activeBtn.classList.toggle("active");
-    if(vw < 380 && pagesDiv.children.length > 7){
-        const btn = document.querySelector('.active')
-        const index = $('.btns-page button').index(btn);
-        $('.btns-page button').addClass('hide');
-        $('.btns-page button').eq(1).removeClass('hide');
-        $('.btns-page button').eq(index-1).removeClass('hide');
-        $('.btns-page button').eq(index).removeClass('hide');
-        $('.btns-page button').eq(index+1).removeClass('hide');
-        if(!$('.btns-page button').eq(index+2).exists()){
-            $('.btns-page button').eq(index-2).removeClass('hide');
-            $('.btns-page button').eq(index-3).removeClass('hide');
-        }
-        if(!$('.btns-page button').eq(index+3).exists()){
-            $('.btns-page button').eq(index-2).removeClass('hide');
-        }
-        if(index == 1){
-            $('.btns-page button').eq(index+1).removeClass('hide');
-            $('.btns-page button').eq(index+2).removeClass('hide');
-            $('.btns-page button').eq(index+3).removeClass('hide');
-        }
-        if(index == 2){
-            $('.btns-page button').eq(index+1).removeClass('hide');
-            $('.btns-page button').eq(index+2).removeClass('hide');
-        }
-        const btnPen = document.querySelector('.btns-page button:nth-last-child(2)');
-        btnPen.classList.remove('hide');
-    }
+	fixPagination();    
 	if (ev.target.params) {
 		renderFlags(ev.target.params);
 	}
 });
 
+function fixPagination(){
+	const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
+	if(vw < 380 && pagesDiv.children.length > 7){
+        const btn = document.querySelector('.active');
+		const pageBtnsArray = $('.btns-page button');
+        const index = pageBtnsArray.index(btn);	
+        pageBtnsArray.addClass('hide');
+		removeClass(pageBtnsArray, 1, index-1, index, index+1);
+        if(!pageBtnsArray.eq(index+2).exists()){
+			removeClass(pageBtnsArray, index-2, index-3);
+        }
+        if(!pageBtnsArray.eq(index+3).exists()){
+			removeClass(pageBtnsArray, index-2);
+        }
+        if(index == 1){
+			removeClass(pageBtnsArray, index+1, index+2, index+3);
+        }
+        if(index == 2){
+			removeClass(pageBtnsArray, index+1,index+2);
+        }
+        const btnPen = document.querySelector('.btns-page button:nth-last-child(2)');
+        btnPen.classList.remove('hide');
+    }
+}
+
+function removeClass(pageBtnsArray, ...array){
+	array.forEach(index=>{
+		pageBtnsArray.eq(index).removeClass('hide');
+	});
+}
 
 function changeGlobalActiveBtn(param) {
 	globalThis.activeBtn.classList.toggle("active");
