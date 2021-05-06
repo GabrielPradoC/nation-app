@@ -154,7 +154,10 @@ function createFlags(responseObj) {
 	const imgArr = responseObj.map(item=> {
 		const imgEl = document.createElement("img");
 		imgEl.src = item.flag;
+		imgEl.style.height = 'auto';
+		imgEl.style.width = 'auto';
 		imgEl.countryName = item.name;
+		imgEl.alt = `${item.name} flag`
 		imgEl.classList.add("flag");
 		return imgEl;
 	});
