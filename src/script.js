@@ -30,22 +30,22 @@ window.addEventListener("load", () => {
 
 pagesDiv.addEventListener("click", (ev) => {
 	if (ev.target.tagName !== "BUTTON") return;
+	const activeBtn = document.querySelector('.active');
 	if (!/[0-9]/.test(ev.target.value)) {
 		if (ev.target.id == "next") {
-			changeGlobalActiveBtn("next");
+			changeGlobalActiveBtn("next", activeBtn);
 		} else {
-			changeGlobalActiveBtn("prev");
+			changeGlobalActiveBtn("prev", activeBtn);
 		}
 		fixPagination();
 		return;
 	}
-	globalThis.activeBtn.classList.toggle("active");
-	globalThis.activeBtn = ev.target;
-	globalThis.activeBtn.classList.toggle("active");
+	activeBtn.classList.toggle("active");
+	ev.target.classList.toggle("active");
 	fixPagination();
-	if (ev.target.params) {
-		renderFlags(ev.target.params);
-	}
+	//render flags accordingly to buton pressed
+	const flagsToRender = createFlags(globalThis.reponseParams[ev.target.value-1]);
+	renderFlags(flagsToRender);
 });
 
 function fixPagination() {
@@ -129,7 +129,7 @@ const event1 = new Event("change");
 selectFilter.dispatchEvent(event1);
 
 async function apiSearchRequest(urlParams1, urlParams2) {
-	pagesDiv.innerText = "";
+	removeChildren(pagesDiv);
 	if (!urlParams1) {
 		var urlOpt = selectFilter.options[selectFilter.selectedIndex].value;
 		var searchSelectObj = document.getElementById("2filter-options");
@@ -156,7 +156,24 @@ async function apiSearchRequest(urlParams1, urlParams2) {
 					? [response.data[1]]
 					: [response.data[0]]
 				: response.data;
-		createFlags(flag);
+		//create buttons
+		globalThis.reponseParams = [];
+		const pages = Math.ceil(flag.length / 12);
+		if (pages > 1) {
+			const btns = [];
+			for (let i = 1; i <= pages; i++) {
+				const flags = flag.splice(0,12);
+				globalThis.reponseParams.push(flags);
+				btns.push(createPageBtn(i));
+			}
+			renderPagingBtns(btns);
+		}else{
+			const flags = flag.splice(0,12);
+			globalThis.reponseParams.push(flags);
+		}
+		//render flags
+		const flagsToRender = createFlags(globalThis.reponseParams[0]);
+		renderFlags(flagsToRender);
 	} catch (error) {
 		console.log(error);
 	}
@@ -164,7 +181,7 @@ async function apiSearchRequest(urlParams1, urlParams2) {
 
 function setFilterOptions(elArray) {
 	const filters2 = document.getElementById("2filter-options");
-	filters2.innerText = "";
+	removeChildren(filters2);
 	elArray.forEach((option) => filters2.appendChild(option));
 	const parentDiv = filters2.closest("div");
 	if (parentDiv.classList.contains("hide")) {
@@ -177,27 +194,15 @@ async function importSearchParams(opt) {
 	setFilterOptions(Arr.default);
 }
 
-function createPageBtn(func, pageNum) {
+function createPageBtn(pageNum) {
 	const btn = document.createElement("button");
     btn.innerText = pageNum;
 	btn.value = pageNum;
-	btn.params = func(pageNum - 1);
 	return btn;
 }
 
-function flagPage(flags) {
-	return (page = 0) => {
-		const arr = [];
-		for (let i = 0; i < 12; i++) {
-			if (!flags[i + page * 12]) break;
-			arr.push(flags[i + page * 12]);
-		}
-		return arr;
-	};
-}
-
 function renderPagingBtns(arr) {
-	pagesDiv.innerHTML = "";
+	removeChildren(pagesDiv);
 	const btn = document.createElement("button");
 	const btnPrev = btn.cloneNode();
 	const btnNext = btn.cloneNode();
@@ -210,7 +215,6 @@ function renderPagingBtns(arr) {
 	arr.forEach((it, ind) => {
 		if (ind == 0) {
 			it.classList.toggle("active");
-			globalThis.activeBtn = it;
 		}
         if(ind > 3 && ind < arr.length-1 && vw < 380){
             it.classList.add('hide');
@@ -224,44 +228,43 @@ function createFlags(responseObj) {
 	const imgArr = responseObj.map(item=> {
 		const imgEl = document.createElement("img");
 		imgEl.src = item.flag;
-		imgEl.style.height = 'auto';
-		imgEl.style.width = 'auto';
 		imgEl.countryName = item.name;
 		imgEl.alt = `${item.name} flag`
 		imgEl.classList.add("flag");
 		return imgEl;
 	});
-	const pages = Math.ceil(imgArr.length / 12);
-	const x = flagPage(imgArr);
-	if (pages > 1) {
-		const btns = [];
-		for (let i = 1; i <= pages; i++) {
-			btns.push(createPageBtn(x, i));
-		}
-		renderPagingBtns(btns);
-	}
-	renderFlags(x());
+	return imgArr;
 }
 
 function renderFlags(flags) {
-	flagsDiv.innerHTML = "";
-	flags.forEach(i=> flagsDiv.append(i));
+	removeChildren(flagsDiv);
+	flagsDiv.append(...flags)
 }
 
-function changeGlobalActiveBtn(param) {
-	globalThis.activeBtn.classList.toggle("active");
+function changeGlobalActiveBtn(param, currentActive) {
+	const prevEl = currentActive.previousElementSibling;
+	const nextEl = currentActive.nextElementSibling;
 	if (
-		param == "next" &&
-		globalThis.activeBtn.nextElementSibling.params != undefined
-	) {
-		renderFlags(globalThis.activeBtn.nextElementSibling.params);
-		globalThis.activeBtn = globalThis.activeBtn.nextElementSibling;
+		param == "next"	&& 
+		nextEl.id !== 'next'
+		) {
+		currentActive.classList.toggle("active");
+		nextEl.classList.toggle("active");
+		const flagsToRender = createFlags(globalThis.reponseParams[nextEl.value-1]);
+		renderFlags(flagsToRender);
 	} else if (
 		param == "prev" &&
-		globalThis.activeBtn.previousElementSibling.params != undefined
-	) {
-		renderFlags(globalThis.activeBtn.previousElementSibling.params);
-		globalThis.activeBtn = globalThis.activeBtn.previousElementSibling;
+		prevEl.id !== 'prev'
+		) {
+		currentActive.classList.toggle("active");
+		prevEl.classList.toggle("active");
+		const flagsToRender = createFlags(globalThis.reponseParams[prevEl.value-1]);
+		renderFlags(flagsToRender);
+	}	
+}
+
+function removeChildren(div){
+	while(div.firstChild){
+		div.removeChild(div.lastChild);
 	}
-	globalThis.activeBtn.classList.toggle("active");
 }
