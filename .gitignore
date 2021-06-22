@@ -3,3 +3,4 @@ package*
 test.mjs
 .vscode
 webpack.*
+test
