@@ -1,6 +1,2 @@
 node_modules
-package*
-test.mjs
 .vscode
-webpack.*
-test
