@@ -1,4 +1,6 @@
-import getOpts from "../auxFiles/getOpts.js";
-const regions = ['Africa', 'Americas', 'Asia', 'Europe', 'Oceania']
-const Arr = getOpts(regions.sort());
-export default Arr;
+import getOpts from "../helpers/generateOptionElements.js";
+import options from './options.json';
+
+const optionsArray = getOpts(options.regions);
+
+export default optionsArray;
