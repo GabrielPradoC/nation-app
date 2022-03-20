@@ -1,11 +1,10 @@
 {
   "name": "nations-app",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Projeto de integração da api https://restcountries.eu/ com um front-end simples.",
   "private": true,
   "sideEffects": false,
   "scripts": {
-    "test": "jest -w",
     "build": "webpack",
     "build:2": "webpack --config webpack.config.js",
     "watch": "webpack -w"
@@ -13,14 +12,14 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "axios": "^0.21.1",
+    "axios": "^0.21.4",
     "css-loader": "^5.2.4",
     "css-minimizer-webpack-plugin": "^2.0.0",
     "mini-css-extract-plugin": "^1.6.0",
     "style-loader": "^2.0.0",
     "webpack": "^5.36.2",
     "webpack-cli": "^4.7.0",
-    "webpack-dev-server": "^3.11.2"
+    "webpack-dev-server": "^4.7.4"
   },
   "dependencies": {
     "jquery": "^3.6.0"
