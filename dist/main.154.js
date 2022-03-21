@@ -1,4 +1,4 @@
-(self["webpackChunknations_app"] = self["webpackChunknations_app"] || []).push([[859,154],{
+(self["webpackChunknations_app"] = self["webpackChunknations_app"] || []).push([[154],{
 
 /***/ 154:
 /***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
@@ -44,25 +44,6 @@ function createOptionElement(option){
 
 
 /* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (generateOptionElements);
-
-/***/ }),
-
-/***/ 859:
-/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
-
-"use strict";
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
-/* harmony export */ });
-/* harmony import */ var _helpers_generateOptionElements_js__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(154);
-/* harmony import */ var _options_json__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(259);
-
-
-
-const optionsArray = (0,_helpers_generateOptionElements_js__WEBPACK_IMPORTED_MODULE_0__.default)(_options_json__WEBPACK_IMPORTED_MODULE_1__.regions);
-
-/* harmony default export */ const __WEBPACK_DEFAULT_EXPORT__ = (optionsArray);
 
 /***/ })
 

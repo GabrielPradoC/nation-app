@@ -27,6 +27,7 @@ module.exports = function xhrAdapter(config) {
   return new Promise(function dispatchXhrRequest(resolve, reject) {
     var requestData = config.data;
     var requestHeaders = config.headers;
+    var responseType = config.responseType;
 
     if (utils.isFormData(requestData)) {
       delete requestHeaders['Content-Type']; // Let the browser set it
@@ -47,23 +48,14 @@ module.exports = function xhrAdapter(config) {
     // Set the request timeout in MS
     request.timeout = config.timeout;
 
-    // Listen for ready state
-    request.onreadystatechange = function handleLoad() {
-      if (!request || request.readyState !== 4) {
+    function onloadend() {
+      if (!request) {
         return;
       }
-
-      // The request errored out and we didn't get a response, this will be
-      // handled by onerror instead
-      // With one exception: request that using file: protocol, most browsers
-      // will return status as 0 even though it's a successful request
-      if (request.status === 0 && !(request.responseURL && request.responseURL.indexOf('file:') === 0)) {
-        return;
-      }
-
       // Prepare the response
       var responseHeaders = 'getAllResponseHeaders' in request ? parseHeaders(request.getAllResponseHeaders()) : null;
-      var responseData = !config.responseType || config.responseType === 'text' ? request.responseText : request.response;
+      var responseData = !responseType || responseType === 'text' ||  responseType === 'json' ?
+        request.responseText : request.response;
       var response = {
         data: responseData,
         status: request.status,
@@ -77,7 +69,30 @@ module.exports = function xhrAdapter(config) {
 
       // Clean up request
       request = null;
-    };
+    }
+
+    if ('onloadend' in request) {
+      // Use onloadend if available
+      request.onloadend = onloadend;
+    } else {
+      // Listen for ready state to emulate onloadend
+      request.onreadystatechange = function handleLoad() {
+        if (!request || request.readyState !== 4) {
+          return;
+        }
+
+        // The request errored out and we didn't get a response, this will be
+        // handled by onerror instead
+        // With one exception: request that using file: protocol, most browsers
+        // will return status as 0 even though it's a successful request
+        if (request.status === 0 && !(request.responseURL && request.responseURL.indexOf('file:') === 0)) {
+          return;
+        }
+        // readystate handler is calling before onerror or ontimeout handlers,
+        // so we should call onloadend on the next 'tick'
+        setTimeout(onloadend);
+      };
+    }
 
     // Handle browser request cancellation (as opposed to a manual cancellation)
     request.onabort = function handleAbort() {
@@ -107,7 +122,10 @@ module.exports = function xhrAdapter(config) {
       if (config.timeoutErrorMessage) {
         timeoutErrorMessage = config.timeoutErrorMessage;
       }
-      reject(createError(timeoutErrorMessage, config, 'ECONNABORTED',
+      reject(createError(
+        timeoutErrorMessage,
+        config,
+        config.transitional && config.transitional.clarifyTimeoutError ? 'ETIMEDOUT' : 'ECONNABORTED',
         request));
 
       // Clean up request
@@ -147,16 +165,8 @@ module.exports = function xhrAdapter(config) {
     }
 
     // Add responseType to request if needed
-    if (config.responseType) {
-      try {
-        request.responseType = config.responseType;
-      } catch (e) {
-        // Expected DOMException thrown by browsers not compatible XMLHttpRequest Level 2.
-        // But, this can be suppressed for 'json' type as it can be parsed by default 'transformResponse' function.
-        if (config.responseType !== 'json') {
-          throw e;
-        }
-      }
+    if (responseType && responseType !== 'json') {
+      request.responseType = config.responseType;
     }
 
     // Handle progress if needed
@@ -375,7 +385,9 @@ var buildURL = __webpack_require__(327);
 var InterceptorManager = __webpack_require__(782);
 var dispatchRequest = __webpack_require__(572);
 var mergeConfig = __webpack_require__(185);
+var validator = __webpack_require__(875);
 
+var validators = validator.validators;
 /**
  * Create a new instance of Axios
  *
@@ -415,20 +427,71 @@ Axios.prototype.request = function request(config) {
     config.method = 'get';
   }
 
-  // Hook up interceptors middleware
-  var chain = [dispatchRequest, undefined];
-  var promise = Promise.resolve(config);
+  var transitional = config.transitional;
 
+  if (transitional !== undefined) {
+    validator.assertOptions(transitional, {
+      silentJSONParsing: validators.transitional(validators.boolean, '1.0.0'),
+      forcedJSONParsing: validators.transitional(validators.boolean, '1.0.0'),
+      clarifyTimeoutError: validators.transitional(validators.boolean, '1.0.0')
+    }, false);
+  }
+
+  // filter out skipped interceptors
+  var requestInterceptorChain = [];
+  var synchronousRequestInterceptors = true;
   this.interceptors.request.forEach(function unshiftRequestInterceptors(interceptor) {
-    chain.unshift(interceptor.fulfilled, interceptor.rejected);
+    if (typeof interceptor.runWhen === 'function' && interceptor.runWhen(config) === false) {
+      return;
+    }
+
+    synchronousRequestInterceptors = synchronousRequestInterceptors && interceptor.synchronous;
+
+    requestInterceptorChain.unshift(interceptor.fulfilled, interceptor.rejected);
   });
 
+  var responseInterceptorChain = [];
   this.interceptors.response.forEach(function pushResponseInterceptors(interceptor) {
-    chain.push(interceptor.fulfilled, interceptor.rejected);
+    responseInterceptorChain.push(interceptor.fulfilled, interceptor.rejected);
   });
 
-  while (chain.length) {
-    promise = promise.then(chain.shift(), chain.shift());
+  var promise;
+
+  if (!synchronousRequestInterceptors) {
+    var chain = [dispatchRequest, undefined];
+
+    Array.prototype.unshift.apply(chain, requestInterceptorChain);
+    chain = chain.concat(responseInterceptorChain);
+
+    promise = Promise.resolve(config);
+    while (chain.length) {
+      promise = promise.then(chain.shift(), chain.shift());
+    }
+
+    return promise;
+  }
+
+
+  var newConfig = config;
+  while (requestInterceptorChain.length) {
+    var onFulfilled = requestInterceptorChain.shift();
+    var onRejected = requestInterceptorChain.shift();
+    try {
+      newConfig = onFulfilled(newConfig);
+    } catch (error) {
+      onRejected(error);
+      break;
+    }
+  }
+
+  try {
+    promise = dispatchRequest(newConfig);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+
+  while (responseInterceptorChain.length) {
+    promise = promise.then(responseInterceptorChain.shift(), responseInterceptorChain.shift());
   }
 
   return promise;
@@ -487,10 +550,12 @@ function InterceptorManager() {
  *
  * @return {Number} An ID used to remove interceptor later
  */
-InterceptorManager.prototype.use = function use(fulfilled, rejected) {
+InterceptorManager.prototype.use = function use(fulfilled, rejected, options) {
   this.handlers.push({
     fulfilled: fulfilled,
-    rejected: rejected
+    rejected: rejected,
+    synchronous: options ? options.synchronous : false,
+    runWhen: options ? options.runWhen : null
   });
   return this.handlers.length - 1;
 };
@@ -614,7 +679,8 @@ module.exports = function dispatchRequest(config) {
   config.headers = config.headers || {};
 
   // Transform request data
-  config.data = transformData(
+  config.data = transformData.call(
+    config,
     config.data,
     config.headers,
     config.transformRequest
@@ -640,7 +706,8 @@ module.exports = function dispatchRequest(config) {
     throwIfCancellationRequested(config);
 
     // Transform response data
-    response.data = transformData(
+    response.data = transformData.call(
+      config,
       response.data,
       response.headers,
       config.transformResponse
@@ -653,7 +720,8 @@ module.exports = function dispatchRequest(config) {
 
       // Transform response data
       if (reason && reason.response) {
-        reason.response.data = transformData(
+        reason.response.data = transformData.call(
+          config,
           reason.response.data,
           reason.response.headers,
           config.transformResponse
@@ -853,6 +921,7 @@ module.exports = function settle(resolve, reject, response) {
 
 
 var utils = __webpack_require__(867);
+var defaults = __webpack_require__(655);
 
 /**
  * Transform the data for a request or a response
@@ -863,9 +932,10 @@ var utils = __webpack_require__(867);
  * @returns {*} The resulting transformed data
  */
 module.exports = function transformData(data, headers, fns) {
+  var context = this || defaults;
   /*eslint no-param-reassign:0*/
   utils.forEach(fns, function transform(fn) {
-    data = fn(data, headers);
+    data = fn.call(context, data, headers);
   });
 
   return data;
@@ -882,6 +952,7 @@ module.exports = function transformData(data, headers, fns) {
 
 var utils = __webpack_require__(867);
 var normalizeHeaderName = __webpack_require__(16);
+var enhanceError = __webpack_require__(481);
 
 var DEFAULT_CONTENT_TYPE = {
   'Content-Type': 'application/x-www-form-urlencoded'
@@ -905,12 +976,35 @@ function getDefaultAdapter() {
   return adapter;
 }
 
+function stringifySafely(rawValue, parser, encoder) {
+  if (utils.isString(rawValue)) {
+    try {
+      (parser || JSON.parse)(rawValue);
+      return utils.trim(rawValue);
+    } catch (e) {
+      if (e.name !== 'SyntaxError') {
+        throw e;
+      }
+    }
+  }
+
+  return (encoder || JSON.stringify)(rawValue);
+}
+
 var defaults = {
+
+  transitional: {
+    silentJSONParsing: true,
+    forcedJSONParsing: true,
+    clarifyTimeoutError: false
+  },
+
   adapter: getDefaultAdapter(),
 
   transformRequest: [function transformRequest(data, headers) {
     normalizeHeaderName(headers, 'Accept');
     normalizeHeaderName(headers, 'Content-Type');
+
     if (utils.isFormData(data) ||
       utils.isArrayBuffer(data) ||
       utils.isBuffer(data) ||
@@ -927,20 +1021,32 @@ var defaults = {
       setContentTypeIfUnset(headers, 'application/x-www-form-urlencoded;charset=utf-8');
       return data.toString();
     }
-    if (utils.isObject(data)) {
-      setContentTypeIfUnset(headers, 'application/json;charset=utf-8');
-      return JSON.stringify(data);
+    if (utils.isObject(data) || (headers && headers['Content-Type'] === 'application/json')) {
+      setContentTypeIfUnset(headers, 'application/json');
+      return stringifySafely(data);
     }
     return data;
   }],
 
   transformResponse: [function transformResponse(data) {
-    /*eslint no-param-reassign:0*/
-    if (typeof data === 'string') {
+    var transitional = this.transitional;
+    var silentJSONParsing = transitional && transitional.silentJSONParsing;
+    var forcedJSONParsing = transitional && transitional.forcedJSONParsing;
+    var strictJSONParsing = !silentJSONParsing && this.responseType === 'json';
+
+    if (strictJSONParsing || (forcedJSONParsing && utils.isString(data) && data.length)) {
       try {
-        data = JSON.parse(data);
-      } catch (e) { /* Ignore */ }
+        return JSON.parse(data);
+      } catch (e) {
+        if (strictJSONParsing) {
+          if (e.name === 'SyntaxError') {
+            throw enhanceError(e, this, 'E_JSON_PARSE');
+          }
+          throw e;
+        }
+      }
     }
+
     return data;
   }],
 
@@ -1393,6 +1499,119 @@ module.exports = function spread(callback) {
 
 /***/ }),
 
+/***/ 875:
+/***/ ((module, __unused_webpack_exports, __webpack_require__) => {
+
+"use strict";
+
+
+var pkg = __webpack_require__(696);
+
+var validators = {};
+
+// eslint-disable-next-line func-names
+['object', 'boolean', 'number', 'function', 'string', 'symbol'].forEach(function(type, i) {
+  validators[type] = function validator(thing) {
+    return typeof thing === type || 'a' + (i < 1 ? 'n ' : ' ') + type;
+  };
+});
+
+var deprecatedWarnings = {};
+var currentVerArr = pkg.version.split('.');
+
+/**
+ * Compare package versions
+ * @param {string} version
+ * @param {string?} thanVersion
+ * @returns {boolean}
+ */
+function isOlderVersion(version, thanVersion) {
+  var pkgVersionArr = thanVersion ? thanVersion.split('.') : currentVerArr;
+  var destVer = version.split('.');
+  for (var i = 0; i < 3; i++) {
+    if (pkgVersionArr[i] > destVer[i]) {
+      return true;
+    } else if (pkgVersionArr[i] < destVer[i]) {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Transitional option validator
+ * @param {function|boolean?} validator
+ * @param {string?} version
+ * @param {string} message
+ * @returns {function}
+ */
+validators.transitional = function transitional(validator, version, message) {
+  var isDeprecated = version && isOlderVersion(version);
+
+  function formatMessage(opt, desc) {
+    return '[Axios v' + pkg.version + '] Transitional option \'' + opt + '\'' + desc + (message ? '. ' + message : '');
+  }
+
+  // eslint-disable-next-line func-names
+  return function(value, opt, opts) {
+    if (validator === false) {
+      throw new Error(formatMessage(opt, ' has been removed in ' + version));
+    }
+
+    if (isDeprecated && !deprecatedWarnings[opt]) {
+      deprecatedWarnings[opt] = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        formatMessage(
+          opt,
+          ' has been deprecated since v' + version + ' and will be removed in the near future'
+        )
+      );
+    }
+
+    return validator ? validator(value, opt, opts) : true;
+  };
+};
+
+/**
+ * Assert object's properties type
+ * @param {object} options
+ * @param {object} schema
+ * @param {boolean?} allowUnknown
+ */
+
+function assertOptions(options, schema, allowUnknown) {
+  if (typeof options !== 'object') {
+    throw new TypeError('options must be an object');
+  }
+  var keys = Object.keys(options);
+  var i = keys.length;
+  while (i-- > 0) {
+    var opt = keys[i];
+    var validator = schema[opt];
+    if (validator) {
+      var value = options[opt];
+      var result = value === undefined || validator(value, opt, options);
+      if (result !== true) {
+        throw new TypeError('option ' + opt + ' must be ' + result);
+      }
+      continue;
+    }
+    if (allowUnknown !== true) {
+      throw Error('Unknown option ' + opt);
+    }
+  }
+}
+
+module.exports = {
+  isOlderVersion: isOlderVersion,
+  assertOptions: assertOptions,
+  validators: validators
+};
+
+
+/***/ }),
+
 /***/ 867:
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
@@ -1400,8 +1619,6 @@ module.exports = function spread(callback) {
 
 
 var bind = __webpack_require__(849);
-
-/*global toString:true*/
 
 // utils is a library of generic helper functions non-specific to axios
 
@@ -1586,7 +1803,7 @@ function isURLSearchParams(val) {
  * @returns {String} The String freed of excess whitespace
  */
 function trim(str) {
-  return str.replace(/^\s*/, '').replace(/\s*$/, '');
+  return str.trim ? str.trim() : str.replace(/^\s+|\s+$/g, '');
 }
 
 /**
@@ -1750,6 +1967,574 @@ module.exports = {
 };
 
 
+/***/ }),
+
+/***/ 696:
+/***/ ((module) => {
+
+"use strict";
+module.exports = JSON.parse('{"_from":"axios@^0.21.4","_id":"axios@0.21.4","_inBundle":false,"_integrity":"sha512-ut5vewkiu8jjGBdqpM44XxjuCjq9LAKeHVmoVfHVzy8eHgxxq8SbAVQNovDA8mVi05kP0Ea/n/UzcSHcTJQfNg==","_location":"/axios","_phantomChildren":{},"_requested":{"type":"range","registry":true,"raw":"axios@^0.21.4","name":"axios","escapedName":"axios","rawSpec":"^0.21.4","saveSpec":null,"fetchSpec":"^0.21.4"},"_requiredBy":["#DEV:/","#USER"],"_resolved":"https://registry.npmjs.org/axios/-/axios-0.21.4.tgz","_shasum":"c67b90dc0568e5c1cf2b0b858c43ba28e2eda575","_spec":"axios@^0.21.4","_where":"D:\\\\linux\\\\recover-recent\\\\Documentos\\\\projetos2\\\\nations-app","author":{"name":"Matt Zabriskie"},"browser":{"./lib/adapters/http.js":"./lib/adapters/xhr.js"},"bugs":{"url":"https://github.com/axios/axios/issues"},"bundleDependencies":false,"bundlesize":[{"path":"./dist/axios.min.js","threshold":"5kB"}],"dependencies":{"follow-redirects":"^1.14.0"},"deprecated":false,"description":"Promise based HTTP client for the browser and node.js","devDependencies":{"coveralls":"^3.0.0","es6-promise":"^4.2.4","grunt":"^1.3.0","grunt-banner":"^0.6.0","grunt-cli":"^1.2.0","grunt-contrib-clean":"^1.1.0","grunt-contrib-watch":"^1.0.0","grunt-eslint":"^23.0.0","grunt-karma":"^4.0.0","grunt-mocha-test":"^0.13.3","grunt-ts":"^6.0.0-beta.19","grunt-webpack":"^4.0.2","istanbul-instrumenter-loader":"^1.0.0","jasmine-core":"^2.4.1","karma":"^6.3.2","karma-chrome-launcher":"^3.1.0","karma-firefox-launcher":"^2.1.0","karma-jasmine":"^1.1.1","karma-jasmine-ajax":"^0.1.13","karma-safari-launcher":"^1.0.0","karma-sauce-launcher":"^4.3.6","karma-sinon":"^1.0.5","karma-sourcemap-loader":"^0.3.8","karma-webpack":"^4.0.2","load-grunt-tasks":"^3.5.2","minimist":"^1.2.0","mocha":"^8.2.1","sinon":"^4.5.0","terser-webpack-plugin":"^4.2.3","typescript":"^4.0.5","url-search-params":"^0.10.0","webpack":"^4.44.2","webpack-dev-server":"^3.11.0"},"homepage":"https://axios-http.com","jsdelivr":"dist/axios.min.js","keywords":["xhr","http","ajax","promise","node"],"license":"MIT","main":"index.js","name":"axios","repository":{"type":"git","url":"git+https://github.com/axios/axios.git"},"scripts":{"build":"NODE_ENV=production grunt build","coveralls":"cat coverage/lcov.info | ./node_modules/coveralls/bin/coveralls.js","examples":"node ./examples/server.js","fix":"eslint --fix lib/**/*.js","postversion":"git push && git push --tags","preversion":"npm test","start":"node ./sandbox/server.js","test":"grunt test","version":"npm run build && grunt version && git add -A dist && git add CHANGELOG.md bower.json package.json"},"typings":"./index.d.ts","unpkg":"dist/axios.min.js","version":"0.21.4"}');
+
+/***/ }),
+
+/***/ 666:
+/***/ (() => {
+
+"use strict";
+// extracted by mini-css-extract-plugin
+
+
+/***/ }),
+
+/***/ 988:
+/***/ ((__unused_webpack_module, __unused_webpack___webpack_exports__, __webpack_require__) => {
+
+"use strict";
+
+;// CONCATENATED MODULE: ./src/searchParams/options.json
+const options_namespaceObject = JSON.parse('{"languages":[{"name":"Africâner","code":"af"},{"name":"Albanês","code":"sq"},{"name":"Amárico","code":"am"},{"name":"Árabe","code":"ar"},{"name":"Armênio","code":"hy"},{"name":"Aymará","code":"ay"},{"name":"Azerbaijano","code":"az"},{"name":"Bielorrusso","code":"be"},{"name":"Bengali","code":"bn"},{"name":"Bislamá","code":"bi"},{"name":"Bósnio","code":"bs"},{"name":"Búlgaro","code":"bg"},{"name":"Birmanês","code":"my"},{"name":"Catalão","code":"ca"},{"name":"Chamorro","code":"ch"},{"name":"Chichewa","code":"ny"},{"name":"Chinês","code":"zh"},{"name":"Croata","code":"hr"},{"name":"hrv","code":"cs"},{"name":"Dinamarquês","code":"da"},{"name":"Divehi","code":"dv"},{"name":"Holandês","code":"nl"},{"name":"Dzongkha","code":"dz"},{"name":"Inglês","code":"en"},{"name":"Estoniano","code":"et"},{"name":"Faroês","code":"fo"},{"name":"Fijiano","code":"fj"},{"name":"Finlandês","code":"fi"},{"name":"Francês","code":"fr"},{"name":"Fula","code":"ff"},{"name":"Georgiano","code":"ka"},{"name":"Alemão","code":"de"},{"name":"Grego","code":"el"},{"name":"Guarani","code":"gn"},{"name":"Crioulo haitiano","code":"ht"},{"name":"Hebraico","code":"he"},{"name":"Hindi","code":"hi"},{"name":"Húngaro","code":"hu"},{"name":"Indonésio","code":"id"},{"name":"Irlandês","code":"ga"},{"name":"Islandês","code":"is"},{"name":"Italiano","code":"it"},{"name":"Japonês","code":"ja"},{"name":"Kalaallisut","code":"kl"},{"name":"Cazaque","code":"kk"},{"name":"Khmer","code":"km"},{"name":"Kinyarwanda","code":"rw"},{"name":"Quirguiz","code":"ky"},{"name":"Congolês","code":"kg"},{"name":"Coreano","code":"ko"},{"name":"Curdo","code":"ku"},{"name":"Latim","code":"la"},{"name":"Luxemburguês","code":"lb"},{"name":"Lingala","code":"ln"},{"name":"Lao","code":"lo"},{"name":"Lituano","code":"lt"},{"name":"Luba-Katanga","code":"lu"},{"name":"Letão","code":"lv"},{"name":"Manx","code":"gv"},{"name":"Macedônio","code":"mk"},{"name":"Malgaxe","code":"mg"},{"name":"Malaio","code":"ms"},{"name":"Maltês","code":"mt"},{"name":"Maori","code":"mi"},{"name":"Marshalês","code":"mh"},{"name":"Mongol","code":"mn"},{"name":"Nauru","code":"na"},{"name":"Bokmål norueguês","code":"nb"},{"name":"Ndebele do Norte","code":"nd"},{"name":"Nepali","code":"ne"},{"name":"Norueguês Nynorsk","code":"nn"},{"name":"Norueguês","code":"no"},{"name":"Ndebele do Sul","code":"nr"},{"name":"Panjabi","code":"pa"},{"name":"Persa","code":"fa"},{"name":"Polonês","code":"pl"},{"name":"Pachto","code":"ps"},{"name":"Português","code":"pt"},{"name":"Quechua","code":"qu"},{"name":"Kirundi","code":"rn"},{"name":"Romeno","code":"ro"},{"name":"Russo","code":"ru"},{"name":"Samoano","code":"sm"},{"name":"Sango","code":"sg"},{"name":"Sérvio","code":"sr"},{"name":"Shona","code":"sn"},{"name":"Sinhala","code":"si"},{"name":"Eslovaco","code":"sk"},{"name":"Esloveno","code":"sl"},{"name":"Somali","code":"so"},{"name":"Southern Sotho","code":"st"},{"name":"Espanhol","code":"es"},{"name":"Suaíli","code":"sw"},{"name":"Suazi","code":"ss"},{"name":"Sueco","code":"sv"},{"name":"Tâmil","code":"ta"},{"name":"Tajique","code":"tg"},{"name":"Tailandês","code":"th"},{"name":"Tigrínia","code":"ti"},{"name":"Turcomeno","code":"tk"},{"name":"Tsuana","code":"tn"},{"name":"Tonga","code":"to"},{"name":"Turco","code":"tr"},{"name":"Tsonga","code":"ts"},{"name":"Ucraniano","code":"uk"},{"name":"Urdu","code":"ur"},{"name":"Uzbeque","code":"uz"},{"name":"Venda","code":"ve"},{"name":"Vietnamita","code":"vi"},{"name":"Xhosa","code":"xh"},{"name":"Zulu","code":"zu"}]}');
+// EXTERNAL MODULE: ./node_modules/axios/index.js
+var axios = __webpack_require__(669);
+var axios_default = /*#__PURE__*/__webpack_require__.n(axios);
+;// CONCATENATED MODULE: ./config.json
+const config_namespaceObject = JSON.parse('{"T":"https://restcountries.com/v2/"}');
+;// CONCATENATED MODULE: ./src/api/BackEnd.js
+
+
+
+/**
+ * api
+ * 
+ * Faz uma requisição GET para a api informada na configuração
+ * 
+ * @param {String} route - Rota desejada
+ * @param {String} searchParam - Parâmetro para ser buscado
+ * @returns A resposta da requisição
+ */
+const api = (route, searchParam) => axios_default().get(`${config_namespaceObject.T}${route}${searchParam}`);
+
+/* harmony default export */ const BackEnd = (api);
+;// CONCATENATED MODULE: ./src/utils/getUrlParams.js
+/**
+ * getUrlParams
+ * 
+ * Recupera os parâmetros na query da url atual
+ * 
+ * @param {String} param - O nome da query para ser buscada
+ * @returns O conteúdo da query caso ela exista ou null caso contrário
+ */
+function getUrlParams(param = ''){
+    try {
+        const url_string = window.location.href.toLocaleLowerCase();
+        const url = new URL(url_string);
+        return url.searchParams.get(param);
+    } catch (error) {
+        console.error(error);
+    }
+    return null;
+}
+
+/* harmony default export */ const utils_getUrlParams = (getUrlParams);
+;// CONCATENATED MODULE: ./src/utils/removeChildren.js
+/**
+ * removeChildren
+ * 
+ * Remove todos os elementos filhos do elemento pai informado
+ * 
+ * @param {HTMLElement} element - Elemento pai
+ */
+function removeChildren(element) {
+    while (element.firstChild) {
+        element.removeChild(element.lastChild);
+    }
+}
+
+/* harmony default export */ const utils_removeChildren = (removeChildren);
+;// CONCATENATED MODULE: ./src/utils/appendElementToParent.js
+
+
+/**
+ * appendElementToParent
+ * 
+ * Limpa os elementos filhos do elemento pai e anexa o elemento informado
+ * 
+ * @param {HTMLElement} parent - Elemento Pai
+ * @param {HTMLElement} element - Elemento para ser anexado
+ */
+function appendElementToParent(parent, element){
+    utils_removeChildren(parent);
+    parent.append(element);
+}
+
+/* harmony default export */ const utils_appendElementToParent = (appendElementToParent);
+;// CONCATENATED MODULE: ./src/utils/createPrevNextButtons.js
+/**
+ * createPrevNextButtons
+ * 
+ * Cria dois botões de paginação
+ * Um com o id 'next' e com o texto de '>'
+ * Um com o id de 'prev' e com o texto de '<'
+ * 
+ * @returns Um array contendo os botões de previous e next, respectivamente
+ */
+function createPrevNextButtons() {
+    const btn = document.createElement('button');
+    const btnPrev = btn.cloneNode();
+    const btnNext = btn.cloneNode();
+    btnNext.id = 'next';
+    btnPrev.id = 'prev';
+    btnNext.innerText = '˃';
+    btnPrev.innerText = '˂';
+    return [btnPrev, btnNext];
+}
+
+/* harmony default export */ const utils_createPrevNextButtons = (createPrevNextButtons);
+;// CONCATENATED MODULE: ./src/utils/getViewWidth.js
+/**
+ * getViewWidth
+ * 
+ * Retorna a largura da tela atual
+ * 
+ * @returns A largura da tela atual em pixels
+ */
+function getViewWidth(){
+    return Math.max(
+        document.documentElement.clientWidth || 0,
+        window.innerWidth || 0,
+    );
+}
+
+/* harmony default export */ const utils_getViewWidth = (getViewWidth);
+;// CONCATENATED MODULE: ./src/utils/renderButtons.js
+
+
+
+
+/**
+ * renderButtons
+ * 
+ * Recebe um array de botões e os anexa no elemento pai
+ * 
+ * @param {HTMLElement} parentElement - Elemento pai
+ * @param {Array<HTMLButtonElement>} buttonsArray - Array com os botões
+ */
+function renderButtons(parentElement, buttonsArray){
+    utils_removeChildren(parentElement)
+    const fragment = document.createDocumentFragment();
+    const [btnPrev, btnNext] = utils_createPrevNextButtons();
+    const viewWidth = utils_getViewWidth();
+    fragment.appendChild(btnPrev);
+    buttonsArray.map((item, index) => {
+        if (index === 0) {
+            item.classList.toggle('active');
+        }
+        if (index > 3 && index < buttonsArray .length - 1 && viewWidth <= 425) {
+            item.classList.add('hide');
+        }
+        fragment.appendChild(item);
+    });
+    fragment.appendChild(btnNext);
+    parentElement.appendChild(fragment);
+}
+
+/* harmony default export */ const utils_renderButtons = (renderButtons);
+;// CONCATENATED MODULE: ./src/utils/createButton.js
+/**
+ * createButton
+ * 
+ * Cria um único botão e o retorna
+ * 
+ * @param {Number | String} content - Conteúdo do botão
+ * @returns - O botão gerado com o texto dentro
+ */
+function createButton(pageNumber) {
+    const btn = document.createElement('button');
+    btn.innerText = pageNumber;
+    btn.value = pageNumber;
+    return btn;
+}
+
+/* harmony default export */ const utils_createButton = (createButton);
+;// CONCATENATED MODULE: ./src/utils/createPages.js
+
+
+
+/**
+ * createPages
+ * 
+ * Separa o array informado no número de páginas informados, de 12 em 12
+ * Depois os anexa no elemento pai informado
+ * 
+ * @param {Array<HTMLButtonElement>} buttonsArray - Array com os botões
+ * @param {Number} numOfPages - Número total de páginas
+ * @param {HTMLElement} parentElement - Elemento pai
+ */
+function createPages(buttonsArray, numOfPages, parentElement){
+    const buttons = [];
+    for (let i = 1; i <= numOfPages; i++) {
+        const flags = buttonsArray.splice(0, 12);
+        globalThis.responseParams.push(flags);
+        buttons.push(utils_createButton(i));
+    }
+    utils_renderButtons(parentElement,buttons);
+}
+
+/* harmony default export */ const utils_createPages = (createPages);
+;// CONCATENATED MODULE: ./src/utils/createFlagsFragment.js
+/**
+ * createFlagsFragment
+ * 
+ * Recebe o array de bandeiras da api e mapeia eles para imagens
+ * 
+ * @param {Array<{name: String, flag: String}>} flagsArray - Array com as informações das bandeiras
+ * @returns 
+ */
+ function createFlagsFragment(flagsArray) {
+    const fragment = document.createDocumentFragment();
+    for (let i = 0; i < flagsArray.length; i++) {
+        const imageElement = document.createElement('img');
+        imageElement.src = flagsArray[i].flag;
+        imageElement.countryName = flagsArray[i].name;
+        imageElement.alt = `Flag of ${flagsArray[i].name}`;
+        imageElement.title = `Flag of ${flagsArray[i].name}`;
+        imageElement.classList.add('flag');
+        fragment.appendChild(imageElement);
+    }
+    return fragment;
+}
+
+/* harmony default export */ const utils_createFlagsFragment = (createFlagsFragment);
+;// CONCATENATED MODULE: ./src/utils/jqueryRemoveClass.js
+/**
+ * jqueryRemoveClass
+ * 
+ * Remove a classe 'hide' de um ou mais elementos html
+ * 
+ * @param {Array<HTMLButtonElement>} buttonsArray - Array com os botões
+ * @param  {...Number} indexArray - Array com os indexes que serão removidos a classe hide
+ */
+ function jqueryRemoveClass(buttonsArray, ...indexArray) {
+    indexArray.forEach((index) => {
+        buttonsArray.eq(index).removeClass('hide');
+    });
+}
+
+/* harmony default export */ const utils_jqueryRemoveClass = (jqueryRemoveClass);
+;// CONCATENATED MODULE: ./src/utils/fixPagination.js
+
+
+
+/**
+ * fixPagination
+ * 
+ * Corrige a disposição dos botões em telas com a largura menor que 425 pixels 
+ * 
+ * @param {HTMLButtonElement} activeButton - O botão da página ativa no momento
+ * @param {HTMLElement} parentElement - O elemento pai
+ */
+ async function fixPagination(activeButton, parentElement) {
+    const viewWidth = utils_getViewWidth();
+    if (viewWidth <= 425 && parentElement.children.length > 7) {
+        const jquery = await __webpack_require__.e(/* import() */ 902).then(__webpack_require__.t.bind(__webpack_require__, 902, 23));
+        const $ = jquery.default;
+
+        $.fn.exists = function () {
+            return this.length !== 0;
+        };
+
+        const pagingButtonsArray = $('.btns-page button');
+        const activeButtonIndex = pagingButtonsArray.index(activeButton);
+        pagingButtonsArray.addClass('hide');
+        
+        switch (activeButtonIndex) {
+            case 1:
+                utils_jqueryRemoveClass(pagingButtonsArray, 1, 2, 3, 4);
+                break;
+            case 2:
+                utils_jqueryRemoveClass(pagingButtonsArray, 1, 2, 3, 4);
+                break;
+            case 3:
+                utils_jqueryRemoveClass(pagingButtonsArray, 1, 2, 3, 4);
+                break;
+            case 7:
+                utils_jqueryRemoveClass(pagingButtonsArray, 1, 5, 6, 7);
+                break;
+            case 8:
+                utils_jqueryRemoveClass(pagingButtonsArray, 1, 5, 6, 7);
+                break;
+            default:
+                utils_jqueryRemoveClass(pagingButtonsArray, 1, activeButtonIndex -1, activeButtonIndex, activeButtonIndex +1);
+                break;
+
+        }
+        const secondToLastButton = document.querySelector(
+            '.btns-page button:nth-last-child(2)',
+        );
+        secondToLastButton.classList.remove('hide');
+    }
+}
+
+/* harmony default export */ const utils_fixPagination = (fixPagination);
+;// CONCATENATED MODULE: ./src/utils/changeGlobalActiveButton.js
+
+
+
+
+/**
+ * changeGlobalActiveBtn
+ * 
+ *  Trata da troca de páginas quando as setas da paginação são clicados
+ * 
+ * @param {'prev' | 'next'} direction - Se é para ir para a página anterior ou a próxima 
+ * @param {HTMLButtonElement} activeButton - O botão da página ativa no momento
+ * @param {HTMLElement} parentElement - O elemento pai para adicionar as bandeiras
+ * @param {HTMLElement} buttonsDiv - Elemento que contém os botões de paginação
+ */
+ function changeGlobalActiveBtn(direction, activeButton, parentElement, buttonsDiv) {
+    const previousElement = activeButton.previousElementSibling;
+    const nextElement = activeButton.nextElementSibling;
+
+    if (direction == 'next' && nextElement.id !== 'next') {
+        activeButton.classList.toggle('active');
+        nextElement.classList.toggle('active');
+
+        const flagsFragment = utils_createFlagsFragment(
+            globalThis.responseParams[nextElement.value - 1],
+        );
+
+        utils_fixPagination(nextElement, buttonsDiv);
+        utils_appendElementToParent(parentElement,flagsFragment);
+    } else if (direction == 'prev' && previousElement.id !== 'prev') {
+        activeButton.classList.toggle('active');
+        previousElement.classList.toggle('active');
+
+        const flagsFragment = utils_createFlagsFragment(
+            globalThis.responseParams[previousElement.value - 1],
+        );
+
+        utils_fixPagination(previousElement, buttonsDiv);
+        utils_appendElementToParent(parentElement, flagsFragment);
+    }
+}
+
+/* harmony default export */ const changeGlobalActiveButton = (changeGlobalActiveBtn);
+;// CONCATENATED MODULE: ./src/utils/paginationClickHandler.js
+
+
+
+
+
+/**
+ * paginationClickHandler
+ * 
+ * Cuida da mudança de página quando o usuário clica na paginação do site
+ * 
+ * @param {Event} event - Evento de clique do usuário
+ * @param {HTMLElement} buttonsDiv - Elemento que contém os botões de paginação
+ * @param {HTMLElement} flagsParentElement - Elemento para renderizar as bandeiras
+ */
+function paginationClickHandler(event, buttonsDiv, flagsParentElement){
+    const activePageButton = document.querySelector('.active');
+    if (event.target.tagName !== 'BUTTON' || event.target.value == activePageButton.value) return;
+    
+    //Caso o botão clicado seja uma das setas apenas altera a página atual
+    if (!/[0-9]/.test(event.target.value)) {
+        changeGlobalActiveButton(event.target.id, activePageButton, flagsParentElement, buttonsDiv);
+        return;
+    }
+
+    activePageButton.classList.toggle('active');
+    event.target.classList.toggle('active');
+    
+    utils_fixPagination(event.target, buttonsDiv);
+
+    const flagsFragment = utils_createFlagsFragment(
+        globalThis.responseParams[event.target.value - 1],
+    );
+    utils_appendElementToParent(flagsParentElement, flagsFragment);
+}
+
+/* harmony default export */ const utils_paginationClickHandler = (paginationClickHandler);
+;// CONCATENATED MODULE: ./src/utils/flagClickHandler.js
+/**
+ * flagClickHandler
+ * 
+ * Trata do evento quando o usuário clica em uma bandeira
+ * 
+ * @param {Event} event - Evento do clique
+ */
+function flagClickHandler(event){
+    if (event.target.tagName === 'IMG') {
+        window.open(
+            `./index2.html?name=${event.target.countryName}`,
+            '_blank',
+            'noopener=yes',
+        );
+    }
+}
+
+/* harmony default export */ const utils_flagClickHandler = (flagClickHandler);
+;// CONCATENATED MODULE: ./src/script2.js
+
+
+
+
+
+
+
+
+
+
+const pagesButtonsDiv = document.querySelector('.btns-page');
+const bordersDiv = document.querySelector('.borders');
+const backBtn = document.querySelector('.btn1');
+
+window.addEventListener('load', ()=>{
+    let name = utils_getUrlParams('name');
+    makeSearchRequest(name ?? 'german');
+});
+
+backBtn.addEventListener('click', ()=>{
+    window.open(`./index.html`, '_self', 'noopener=yes');
+})
+
+bordersDiv.addEventListener('click', utils_flagClickHandler);
+
+pagesButtonsDiv.addEventListener('click', event => utils_paginationClickHandler(event, pagesButtonsDiv, bordersDiv));    
+
+/**
+ * renderMainFlag
+ * 
+ * Anexa a bandeira junto com as informações do país escolhido na página
+ * 
+ * @param {*} countryData - Resposta da API com as informações do país
+ */
+function renderMainFlag(countryData){
+    const fragment = document.createDocumentFragment();
+    const flag = utils_createFlagsFragment([countryData]);
+    document.querySelector('.main-country').prepend(flag);
+
+    const linkElement = document.createElement('a');
+    const regionText = document.createTextNode(`${countryData.region}`);
+    linkElement.appendChild(regionText);
+    linkElement.href = `./index.html?name=${countryData.region.toLowerCase()}`;
+
+    const regionP = createPElement('Região: ');
+    regionP.appendChild(linkElement);
+
+    const nameP = createPElement(`Nome: ${countryData.translations.pt || countryData.name}`);
+    const capitalP = createPElement(`Capital: ${countryData.capital}`);
+    const subregionP = createPElement(`Sub-região: ${countryData.subregion}`);
+    const populationP = createPElement(`População: ${countryData.population}`);
+    const countryLangs = countryData.languages.map(language => language.iso639_1);
+    const countryLangsMap = options_namespaceObject.languages.filter(language => countryLangs.includes(language.code)).map(language => language.name);
+    const languagesP = createPElement(`Línguas: ${!countryLangsMap[1]? countryLangsMap[0]: countryLangsMap.join(', ')}`)
+    appendToElement(fragment, nameP, capitalP, regionP, subregionP, populationP, languagesP);
+
+    const textDiv = document.querySelector('.text');
+    textDiv.appendChild(fragment);
+
+    if(countryData.borders){
+        apiRequestBorders(countryData.borders);
+    }
+}
+
+/**
+ * appendToElement
+ * 
+ * Anexa um ou mais elementos ao elemento pai informado
+ * 
+ * @param {HTMLElement} parent - Elemento pai 
+ * @param  {...HTMLElement} childrens - Um ou mais elementos filhos
+ */
+function appendToElement(parent, ...childrens){
+    childrens.forEach(element =>{
+        parent.appendChild(element);
+    });   
+}
+
+/**
+ * apiRequestBorders
+ * 
+ * Faz a requisição para a API e retorna os dados dos países informados
+ * 
+ * @param {Array<String>} codes - Uma ou mais strings ISO 3166-1 representantes de cada país
+ */
+async function apiRequestBorders(codes){
+    if(codes.length<1) return;
+
+    try {
+        const response = await BackEnd('alpha', `?codes=${codes.join(',')}`);
+        renderBorderFlags(response.data);
+    } catch (error) {
+        console.log(error);
+    }    
+}
+
+/**
+ * renderBorderFlags
+ * 
+ * Anexa as bandeiras recebidas na página
+ * 
+ * @param {Array<*>} flags 
+ */
+function renderBorderFlags(flags){
+
+    globalThis.responseParams = [];
+    const numOfPages = Math.ceil(flags.length / 12);
+    if (numOfPages > 1) {
+        utils_createPages(flags, numOfPages, pagesButtonsDiv);
+    } else {
+        const flagsSplit = flags.splice(0, 12);
+        globalThis.responseParams.push(flagsSplit);
+    }
+    const flagsFragment = utils_createFlagsFragment(globalThis.responseParams[0]);
+    utils_appendElementToParent(bordersDiv, flagsFragment);
+}
+
+/**
+ * createPElement
+ * 
+ * Cria um elemento p com o texto informado e o retorna
+ * 
+ * @param {String} innerText - Texto para ser anexado ao elemento
+ * @returns Elemento p com o texto
+ */
+function createPElement(innerText){
+    const pElement = document.createElement('p');
+    const textNode = document.createTextNode(innerText);
+    pElement.appendChild(textNode);
+    return pElement;
+}
+
+/**
+ * makeSearchRequest
+ * 
+ * Faz a chamada para a API
+ * 
+ * @param {string} countryName - Nome do país para ser buscado
+ */
+async function makeSearchRequest(countryName) {
+    utils_removeChildren(bordersDiv);
+    utils_removeChildren(pagesButtonsDiv);
+
+    try {
+        const response = await BackEnd('name/', countryName);        
+        // No caso desses países específicos a API estava retornando mais de um resultado
+        // Então é necessário fazer o tratamento da resposta
+        const responseData = countryName === 'India' ||
+                  countryName === 'Guinea' ||
+                  countryName === 'Samoa' ||
+                  countryName === 'Sudan'
+                    ? response.data[1]
+                    : response.data[0];
+        renderMainFlag(responseData)
+    } catch (error) {
+        console.error(error);
+        alert('Something went wrong, please try again later');
+    }
+}
+
 /***/ })
 
 /******/ 	});
@@ -1772,11 +2557,14 @@ module.exports = {
 /******/ 		};
 /******/ 	
 /******/ 		// Execute the module function
-/******/ 		__webpack_modules__[moduleId](module, module.exports, __webpack_require__);
+/******/ 		__webpack_modules__[moduleId].call(module.exports, module, module.exports, __webpack_require__);
 /******/ 	
 /******/ 		// Return the exports of the module
 /******/ 		return module.exports;
 /******/ 	}
+/******/ 	
+/******/ 	// expose the modules object (__webpack_modules__)
+/******/ 	__webpack_require__.m = __webpack_modules__;
 /******/ 	
 /************************************************************************/
 /******/ 	/* webpack/runtime/compat get default export */
@@ -1788,6 +2576,36 @@ module.exports = {
 /******/ 				() => (module);
 /******/ 			__webpack_require__.d(getter, { a: getter });
 /******/ 			return getter;
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/create fake namespace object */
+/******/ 	(() => {
+/******/ 		var getProto = Object.getPrototypeOf ? (obj) => (Object.getPrototypeOf(obj)) : (obj) => (obj.__proto__);
+/******/ 		var leafPrototypes;
+/******/ 		// create a fake namespace object
+/******/ 		// mode & 1: value is a module id, require it
+/******/ 		// mode & 2: merge all properties of value into the ns
+/******/ 		// mode & 4: return value when already ns object
+/******/ 		// mode & 16: return value when it's Promise-like
+/******/ 		// mode & 8|1: behave like require
+/******/ 		__webpack_require__.t = function(value, mode) {
+/******/ 			if(mode & 1) value = this(value);
+/******/ 			if(mode & 8) return value;
+/******/ 			if(typeof value === 'object' && value) {
+/******/ 				if((mode & 4) && value.__esModule) return value;
+/******/ 				if((mode & 16) && typeof value.then === 'function') return value;
+/******/ 			}
+/******/ 			var ns = Object.create(null);
+/******/ 			__webpack_require__.r(ns);
+/******/ 			var def = {};
+/******/ 			leafPrototypes = leafPrototypes || [null, getProto({}), getProto([]), getProto(getProto)];
+/******/ 			for(var current = mode & 2 && value; typeof current == 'object' && !~leafPrototypes.indexOf(current); current = getProto(current)) {
+/******/ 				Object.getOwnPropertyNames(current).forEach((key) => (def[key] = () => (value[key])));
+/******/ 			}
+/******/ 			def['default'] = () => (value);
+/******/ 			__webpack_require__.d(ns, def);
+/******/ 			return ns;
 /******/ 		};
 /******/ 	})();
 /******/ 	
@@ -1803,273 +2621,226 @@ module.exports = {
 /******/ 		};
 /******/ 	})();
 /******/ 	
+/******/ 	/* webpack/runtime/ensure chunk */
+/******/ 	(() => {
+/******/ 		__webpack_require__.f = {};
+/******/ 		// This file contains only the entry chunk.
+/******/ 		// The chunk loading function for additional chunks
+/******/ 		__webpack_require__.e = (chunkId) => {
+/******/ 			return Promise.all(Object.keys(__webpack_require__.f).reduce((promises, key) => {
+/******/ 				__webpack_require__.f[key](chunkId, promises);
+/******/ 				return promises;
+/******/ 			}, []));
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/get javascript chunk filename */
+/******/ 	(() => {
+/******/ 		// This function allow to reference async chunks
+/******/ 		__webpack_require__.u = (chunkId) => {
+/******/ 			// return url for filenames based on template
+/******/ 			return "main." + chunkId + ".js";
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/get mini-css chunk filename */
+/******/ 	(() => {
+/******/ 		// This function allow to reference all chunks
+/******/ 		__webpack_require__.miniCssF = (chunkId) => {
+/******/ 			// return url for filenames based on template
+/******/ 			return undefined;
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/global */
+/******/ 	(() => {
+/******/ 		__webpack_require__.g = (function() {
+/******/ 			if (typeof globalThis === 'object') return globalThis;
+/******/ 			try {
+/******/ 				return this || new Function('return this')();
+/******/ 			} catch (e) {
+/******/ 				if (typeof window === 'object') return window;
+/******/ 			}
+/******/ 		})();
+/******/ 	})();
+/******/ 	
 /******/ 	/* webpack/runtime/hasOwnProperty shorthand */
 /******/ 	(() => {
 /******/ 		__webpack_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))
 /******/ 	})();
 /******/ 	
+/******/ 	/* webpack/runtime/load script */
+/******/ 	(() => {
+/******/ 		var inProgress = {};
+/******/ 		var dataWebpackPrefix = "nations-app:";
+/******/ 		// loadScript function to load a script via script tag
+/******/ 		__webpack_require__.l = (url, done, key, chunkId) => {
+/******/ 			if(inProgress[url]) { inProgress[url].push(done); return; }
+/******/ 			var script, needAttach;
+/******/ 			if(key !== undefined) {
+/******/ 				var scripts = document.getElementsByTagName("script");
+/******/ 				for(var i = 0; i < scripts.length; i++) {
+/******/ 					var s = scripts[i];
+/******/ 					if(s.getAttribute("src") == url || s.getAttribute("data-webpack") == dataWebpackPrefix + key) { script = s; break; }
+/******/ 				}
+/******/ 			}
+/******/ 			if(!script) {
+/******/ 				needAttach = true;
+/******/ 				script = document.createElement('script');
+/******/ 		
+/******/ 				script.charset = 'utf-8';
+/******/ 				script.timeout = 120;
+/******/ 				if (__webpack_require__.nc) {
+/******/ 					script.setAttribute("nonce", __webpack_require__.nc);
+/******/ 				}
+/******/ 				script.setAttribute("data-webpack", dataWebpackPrefix + key);
+/******/ 				script.src = url;
+/******/ 			}
+/******/ 			inProgress[url] = [done];
+/******/ 			var onScriptComplete = (prev, event) => {
+/******/ 				// avoid mem leaks in IE.
+/******/ 				script.onerror = script.onload = null;
+/******/ 				clearTimeout(timeout);
+/******/ 				var doneFns = inProgress[url];
+/******/ 				delete inProgress[url];
+/******/ 				script.parentNode && script.parentNode.removeChild(script);
+/******/ 				doneFns && doneFns.forEach((fn) => (fn(event)));
+/******/ 				if(prev) return prev(event);
+/******/ 			}
+/******/ 			;
+/******/ 			var timeout = setTimeout(onScriptComplete.bind(null, undefined, { type: 'timeout', target: script }), 120000);
+/******/ 			script.onerror = onScriptComplete.bind(null, script.onerror);
+/******/ 			script.onload = onScriptComplete.bind(null, script.onload);
+/******/ 			needAttach && document.head.appendChild(script);
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/make namespace object */
+/******/ 	(() => {
+/******/ 		// define __esModule on exports
+/******/ 		__webpack_require__.r = (exports) => {
+/******/ 			if(typeof Symbol !== 'undefined' && Symbol.toStringTag) {
+/******/ 				Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+/******/ 			}
+/******/ 			Object.defineProperty(exports, '__esModule', { value: true });
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/publicPath */
+/******/ 	(() => {
+/******/ 		var scriptUrl;
+/******/ 		if (__webpack_require__.g.importScripts) scriptUrl = __webpack_require__.g.location + "";
+/******/ 		var document = __webpack_require__.g.document;
+/******/ 		if (!scriptUrl && document) {
+/******/ 			if (document.currentScript)
+/******/ 				scriptUrl = document.currentScript.src
+/******/ 			if (!scriptUrl) {
+/******/ 				var scripts = document.getElementsByTagName("script");
+/******/ 				if(scripts.length) scriptUrl = scripts[scripts.length - 1].src
+/******/ 			}
+/******/ 		}
+/******/ 		// When supporting browsers where an automatic publicPath is not supported you must specify an output.publicPath manually via configuration
+/******/ 		// or pass an empty string ("") and set the __webpack_public_path__ variable from your code to use your own logic.
+/******/ 		if (!scriptUrl) throw new Error("Automatic publicPath is not supported in this browser");
+/******/ 		scriptUrl = scriptUrl.replace(/#.*$/, "").replace(/\?.*$/, "").replace(/\/[^\/]+$/, "/");
+/******/ 		__webpack_require__.p = scriptUrl;
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/jsonp chunk loading */
+/******/ 	(() => {
+/******/ 		// no baseURI
+/******/ 		
+/******/ 		// object to store loaded and loading chunks
+/******/ 		// undefined = chunk not loaded, null = chunk preloaded/prefetched
+/******/ 		// [resolve, reject, Promise] = chunk loading, 0 = chunk loaded
+/******/ 		var installedChunks = {
+/******/ 			373: 0
+/******/ 		};
+/******/ 		
+/******/ 		__webpack_require__.f.j = (chunkId, promises) => {
+/******/ 				// JSONP chunk loading for javascript
+/******/ 				var installedChunkData = __webpack_require__.o(installedChunks, chunkId) ? installedChunks[chunkId] : undefined;
+/******/ 				if(installedChunkData !== 0) { // 0 means "already installed".
+/******/ 		
+/******/ 					// a Promise means "currently loading".
+/******/ 					if(installedChunkData) {
+/******/ 						promises.push(installedChunkData[2]);
+/******/ 					} else {
+/******/ 						if(true) { // all chunks have JS
+/******/ 							// setup Promise in chunk cache
+/******/ 							var promise = new Promise((resolve, reject) => (installedChunkData = installedChunks[chunkId] = [resolve, reject]));
+/******/ 							promises.push(installedChunkData[2] = promise);
+/******/ 		
+/******/ 							// start chunk loading
+/******/ 							var url = __webpack_require__.p + __webpack_require__.u(chunkId);
+/******/ 							// create error before stack unwound to get useful stacktrace later
+/******/ 							var error = new Error();
+/******/ 							var loadingEnded = (event) => {
+/******/ 								if(__webpack_require__.o(installedChunks, chunkId)) {
+/******/ 									installedChunkData = installedChunks[chunkId];
+/******/ 									if(installedChunkData !== 0) installedChunks[chunkId] = undefined;
+/******/ 									if(installedChunkData) {
+/******/ 										var errorType = event && (event.type === 'load' ? 'missing' : event.type);
+/******/ 										var realSrc = event && event.target && event.target.src;
+/******/ 										error.message = 'Loading chunk ' + chunkId + ' failed.\n(' + errorType + ': ' + realSrc + ')';
+/******/ 										error.name = 'ChunkLoadError';
+/******/ 										error.type = errorType;
+/******/ 										error.request = realSrc;
+/******/ 										installedChunkData[1](error);
+/******/ 									}
+/******/ 								}
+/******/ 							};
+/******/ 							__webpack_require__.l(url, loadingEnded, "chunk-" + chunkId, chunkId);
+/******/ 						} else installedChunks[chunkId] = 0;
+/******/ 					}
+/******/ 				}
+/******/ 		};
+/******/ 		
+/******/ 		// no prefetching
+/******/ 		
+/******/ 		// no preloaded
+/******/ 		
+/******/ 		// no HMR
+/******/ 		
+/******/ 		// no HMR manifest
+/******/ 		
+/******/ 		// no on chunks loaded
+/******/ 		
+/******/ 		// install a JSONP callback for chunk loading
+/******/ 		var webpackJsonpCallback = (parentChunkLoadingFunction, data) => {
+/******/ 			var [chunkIds, moreModules, runtime] = data;
+/******/ 			// add "moreModules" to the modules object,
+/******/ 			// then flag all "chunkIds" as loaded and fire callback
+/******/ 			var moduleId, chunkId, i = 0;
+/******/ 			for(moduleId in moreModules) {
+/******/ 				if(__webpack_require__.o(moreModules, moduleId)) {
+/******/ 					__webpack_require__.m[moduleId] = moreModules[moduleId];
+/******/ 				}
+/******/ 			}
+/******/ 			if(runtime) var result = runtime(__webpack_require__);
+/******/ 			if(parentChunkLoadingFunction) parentChunkLoadingFunction(data);
+/******/ 			for(;i < chunkIds.length; i++) {
+/******/ 				chunkId = chunkIds[i];
+/******/ 				if(__webpack_require__.o(installedChunks, chunkId) && installedChunks[chunkId]) {
+/******/ 					installedChunks[chunkId][0]();
+/******/ 				}
+/******/ 				installedChunks[chunkIds[i]] = 0;
+/******/ 			}
+/******/ 		
+/******/ 		}
+/******/ 		
+/******/ 		var chunkLoadingGlobal = self["webpackChunknations_app"] = self["webpackChunknations_app"] || [];
+/******/ 		chunkLoadingGlobal.forEach(webpackJsonpCallback.bind(null, 0));
+/******/ 		chunkLoadingGlobal.push = webpackJsonpCallback.bind(null, chunkLoadingGlobal.push.bind(chunkLoadingGlobal));
+/******/ 	})();
+/******/ 	
 /************************************************************************/
-var __webpack_exports__ = {};
-// This entry need to be wrapped in an IIFE because it need to be in strict mode.
-(() => {
-"use strict";
-
-;// CONCATENATED MODULE: ./src/searchParams/languages.js
-const l=[{name:"Africâner",code:"af"},{name:"Albanês",code:"sq"},{name:"Amárico",code:"am"},{name:"Árabe",code:"ar"},{name:"Armênio",code:"hy"},{name:"Aymará",code:"ay"},{name:"Azerbaijano",code:"az"},{name:"Bielorrusso",code:"be"},{name:"Bengali",code:"bn"},{name:"Bislamá",code:"bi"},{name:"Bósnio",code:"bs"},{name:"Búlgaro",code:"bg"},{name:"Birmanês",code:"my"},{name:"Catalão",code:"ca"},{name:"Chamorro",code:"ch"},{name:"Chichewa",code:"ny"},{name:"Chinês",code:"zh"},{name:"Croata",code:"hr"},{name:"hrv",code:"cs"},{name:"Dinamarquês",code:"da"},{name:"Divehi",code:"dv"},{name:"Holandês",code:"nl"},{name:"Dzongkha",code:"dz"},{name:"Inglês",code:"en"},{name:"Estoniano",code:"et"},{name:"Faroês",code:"fo"},{name:"Fijiano",code:"fj"},{name:"Finlandês",code:"fi"},{name:"Francês",code:"fr"},{name:"Fula",code:"ff"},{name:"Georgiano",code:"ka"},{name:"Alemão",code:"de"},{name:"Grego",code:"el"},{name:"Guarani",code:"gn"},{name:"Crioulo haitiano",code:"ht"},{name:"Hebraico",code:"he"},{name:"Hindi",code:"hi"},{name:"Húngaro",code:"hu"},{name:"Indonésio",code:"id"},{name:"Irlandês",code:"ga"},{name:"Islandês",code:"is"},{name:"Italiano",code:"it"},{name:"Japonês",code:"ja"},{name:"Kalaallisut",code:"kl"},{name:"Cazaque",code:"kk"},{name:"Khmer",code:"km"},{name:"Kinyarwanda",code:"rw"},{name:"Quirguiz",code:"ky"},{name:"Congolês",code:"kg"},{name:"Coreano",code:"ko"},{name:"Curdo",code:"ku"},{name:"Latim",code:"la"},{name:"Luxemburguês",code:"lb"},{name:"Lingala",code:"ln"},{name:"Lao",code:"lo"},{name:"Lituano",code:"lt"},{name:"Luba-Katanga",code:"lu"},{name:"Letão",code:"lv"},{name:"Manx",code:"gv"},{name:"Macedônio",code:"mk"},{name:"Malgaxe",code:"mg"},{name:"Malaio",code:"ms"},{name:"Maltês",code:"mt"},{name:"Maori",code:"mi"},{name:"Marshalês",code:"mh"},{name:"Mongol",code:"mn"},{name:"Nauru",code:"na"},{name:"Bokmål norueguês",code:"nb"},{name:"Ndebele do Norte",code:"nd"},{name:"Nepali",code:"ne"},{name:"Norueguês Nynorsk",code:"nn"},{name:"Norueguês",code:"no"},{name:"Ndebele do Sul",code:"nr"},{name:"Panjabi",code:"pa"},{name:"Persa",code:"fa"},{name:"Polonês",code:"pl"},{name:"Pachto",code:"ps"},{name:"Português",code:"pt"},{name:"Quechua",code:"qu"},{name:"Kirundi",code:"rn"},{name:"Romeno",code:"ro"},{name:"Russo",code:"ru"},{name:"Samoano",code:"sm"},{name:"Sango",code:"sg"},{name:"Sérvio",code:"sr"},{name:"Shona",code:"sn"},{name:"Sinhala",code:"si"},{name:"Eslovaco",code:"sk"},{name:"Esloveno",code:"sl"},{name:"Somali",code:"so"},{name:"Southern Sotho",code:"st"},{name:"Espanhol",code:"es"},{name:"Suaíli",code:"sw"},{name:"Suazi",code:"ss"},{name:"Sueco",code:"sv"},{name:"Tâmil",code:"ta"},{name:"Tajique",code:"tg"},{name:"Tailandês",code:"th"},{name:"Tigrínia",code:"ti"},{name:"Turcomeno",code:"tk"},{name:"Tsuana",code:"tn"},{name:"Tonga",code:"to"},{name:"Turco",code:"tr"},{name:"Tsonga",code:"ts"},{name:"Ucraniano",code:"uk"},{name:"Urdu",code:"ur"},{name:"Uzbeque",code:"uz"},{name:"Venda",code:"ve"},{name:"Vietnamita",code:"vi"},{name:"Xhosa",code:"xh"},{name:"Zulu",code:"zu"},].sort((a,b)=>(a.name.localeCompare(b.name, 'en', { sensitivity: 'base' })));
-// EXTERNAL MODULE: ./node_modules/axios/index.js
-var axios = __webpack_require__(669);
-var axios_default = /*#__PURE__*/__webpack_require__.n(axios);
-;// CONCATENATED MODULE: ./src/script2.js
-
-const pagesButtonsDiv = document.querySelector('.btns-page');
-const bordersDiv = document.querySelector('.borders');
-const backBtn = document.querySelector('.btn1');
-
-
-//on page load get the url parameters
-window.addEventListener('load', ()=>{
-    let name = '';
-    try {
-        const url_string = window.location.href.toLocaleLowerCase();
-        const url = new URL(url_string);
-        name = url.searchParams.get('name');
-    } catch (error) {
-        console.log(error);
-    }
-    if (name) {
-        //make api request using url parameter
-        makeSearchRequest(name);
-    } else {
-        //make default api request to show one flag on page load
-        makeSearchRequest('russia');
-    }
-});
-
-//button for returning to the first page
-backBtn.addEventListener('click', ()=>{
-    window.open(`./index.html`, '_self', 'noopener=yes');
-})
-
-//add one event listener on the parent div, listen for clicks on images and then redirect to the second page
-bordersDiv.addEventListener('click', (event) => {
-    if (event.target.tagName === 'IMG') {
-        window.open(
-            `./index2.html?name=${event.target.countryName}`,
-            '_blank',
-            'noopener=yes',
-        );
-    }
-});
-
-pagesButtonsDiv.addEventListener('click', event=>{
-    //check if the clicked element is a button
-    const activePageButton = document.querySelector('.active');
-    if (event.target.tagName !== 'BUTTON' || event.target.value == activePageButton.value) return;
-    
-    //check if the clicked button is a page button or a arow to switch to next/previous page
-    if (!/[0-9]/.test(event.target.value)) {
-        if (event.target.id === 'next') {
-            //next
-            changeGlobalActiveBtn('next', activePageButton);
-        } else {
-            //previous
-            changeGlobalActiveBtn('prev', activePageButton);
-        }
-        //if the paging div has more than 7 buttons AND the view width is less than 380
-        //i made this to prevent the buttons glitching when there isn't enough space for all of them
-        return;
-    }
-    //if the event target is a button with a number the toggle the active button
-    activePageButton.classList.toggle('active');
-    event.target.classList.toggle('active');
-    //create the flags of the selected page and render them
-    const flagsFragment = createFlagsFragment(
-        globalThis.responseParams[event.target.value - 1],
-    );
-    appendElementToDiv(bordersDiv, flagsFragment);
-});    
-
-function renderMainFlag(countryData){
-    const fragment = document.createDocumentFragment();
-    const flag = createFlagsFragment([countryData]);
-    document.querySelector('.main-country').prepend(flag);
-    const linkElement = document.createElement('a');
-    const regionText = document.createTextNode(`${countryData.region}`);
-    linkElement.appendChild(regionText);
-    linkElement.href = `./index.html?name=${countryData.region.toLowerCase()}`;
-    const regionP = createPElement('Região: ');
-    regionP.appendChild(linkElement);
-    const nameP = createPElement(`Nome: ${countryData.translations.pt || countryData.name}`);
-    const capitalP = createPElement(`Capital: ${countryData.capital}`);
-    const subregionP = createPElement(`Sub-região: ${countryData.subregion}`);
-    const populationP = createPElement(`População: ${countryData.population}`);
-    const countryLangs = countryData.languages.map(language => language.iso639_1);
-    const countryLangsMap = l.filter(language => countryLangs.includes(language.code)).map(language => language.name);
-    const languagesP = createPElement(`Línguas: ${!countryLangsMap[1]? countryLangsMap[0]: countryLangsMap.join(', ')}`)
-    appendToElement(fragment, nameP, capitalP, regionP, subregionP, populationP, languagesP);
-    const textDiv = document.querySelector('.text');
-    textDiv.appendChild(fragment);
-    //make request for country borders
-    apiRequestBorders(countryData.borders)
-}
-
-function appendToElement(parent, ...childrens){
-    childrens.forEach(element =>{
-        parent.appendChild(element);
-    });   
-}
-
-async function apiRequestBorders(codes){
-    if(codes.length<1) return;
-    try {
-        const response = await axios_default().get(`https://restcountries.eu/rest/v2/alpha?codes=${codes.join(';')}`);
-        renderBorderFlags(response.data);
-    } catch (error) {
-        console.log(error);
-    }    
-}
-
-function renderBorderFlags(flags){
-    globalThis.responseParams = [];
-    const numOfPages = Math.ceil(flags.length / 12);
-    if (numOfPages > 1) {
-        createPages(flags, numOfPages);
-    } else {
-        const flagsSplit = flags.splice(0, 12);
-        globalThis.responseParams.push(flagsSplit);
-    }
-    const flagsFragment = createFlagsFragment(globalThis.responseParams[0]);
-    appendElementToDiv(bordersDiv, flagsFragment);
-}
-
-function createPElement(innerText){
-    const pElement = document.createElement('p');
-    const text = document.createTextNode(innerText);
-    pElement.appendChild(text);
-    return pElement;
-}
-
-//function to change wich button is currently the active when the arrows are clicked
-function changeGlobalActiveBtn(param, activeButton) {
-    const prevEl = activeButton.previousElementSibling;
-    const nextEl = activeButton.nextElementSibling;
-    if (param == 'next' && nextEl.id !== 'next') {
-        activeButton.classList.toggle('active');
-        nextEl.classList.toggle('active');
-        //create the flags and append them
-        const flagsFragment = createFlagsFragment(
-            globalThis.responseParams[nextEl.value - 1],
-        );
-        appendElementToDiv(bordersDiv, flagsFragment);
-    } else if (param == 'prev' && prevEl.id !== 'prev') {
-        activeButton.classList.toggle('active');
-        prevEl.classList.toggle('active');
-        const flagsFragment = createFlagsFragment(
-            globalThis.responseParams[prevEl.value - 1],
-        );
-        appendElementToDiv(bordersDiv, flagsFragment);
-    }
-}
-
-async function makeSearchRequest(countryName) {
-    removeChildren(bordersDiv);
-    removeChildren(pagesButtonsDiv);
-    try {
-            const response = await axios_default().get(
-                `https://restcountries.eu/rest/v2/name/${countryName}`,
-            );        
-        //these results were returning more than one flag, that's why i'm filtering the response data
-        const responseData = countryName === 'India' ||
-                  countryName === 'Guinea' ||
-                  countryName === 'Samoa' ||
-                  countryName === 'Sudan'
-                    ? response.data[1]
-                    : response.data[0];
-        renderMainFlag(responseData)
-    } catch (error) {
-        console.error(error);
-        alert('Something went wrong, please try again later');
-    }
-}
-
-
-function appendElementToDiv(div, element) {
-    removeChildren(div);
-    div.append(element);
-}
-
-function renderButtons(array) {
-    removeChildren(pagesButtonsDiv);
-    const fragment = document.createDocumentFragment();
-    const [btnPrev, btnNext] = createPrevNextBtn();
-    fragment.appendChild(btnPrev);
-    array.forEach((item, index) => {
-        if (index === 0) {
-            item.classList.toggle('active');
-        }
-        fragment.appendChild(item);
-    });
-    fragment.appendChild(btnNext);
-    pagesButtonsDiv.appendChild(fragment);
-}
-
-
-
-function removeChildren(divElement) {
-    while (divElement.firstChild) {
-        divElement.removeChild(divElement.lastChild);
-    }
-}
-
-function createPages(array, numOfPages) {
-    const buttons = [];
-    for (let i = 1; i <= numOfPages; i++) {
-        const flags = array.splice(0, 12);
-        globalThis.responseParams.push(flags);
-        buttons.push(createButton(i));
-    }
-    renderButtons(buttons);
-}
-
-function createButton(pageNumber) {
-    const btn = document.createElement('button');
-    btn.innerText = pageNumber;
-    btn.value = pageNumber;
-    return btn;
-}
-
-function createPrevNextBtn() {
-    const btn = document.createElement('button');
-    const btnPrev = btn.cloneNode();
-    const btnNext = btn.cloneNode();
-    btnNext.id = 'next';
-    btnPrev.id = 'prev';
-    btnNext.innerText = '˃';
-    btnPrev.innerText = '˂';
-    return [btnPrev, btnNext];
-}
-
-function createFlagsFragment(resFlagsArray) {
-    const fragment = document.createDocumentFragment();
-    for (let i = 0; i < resFlagsArray.length; i++) {
-        const imgEl = document.createElement('img');
-        imgEl.src = resFlagsArray[i].flag;
-        imgEl.countryName = resFlagsArray[i].name;
-        imgEl.alt = `Flag of ${resFlagsArray[i].name}`;
-        imgEl.classList.add('flag');
-        fragment.appendChild(imgEl);
-    }
-    return fragment;
-}
-
-})();
-
-// This entry need to be wrapped in an IIFE because it need to be in strict mode.
-(() => {
-"use strict";
-// extracted by mini-css-extract-plugin
-
-})();
-
+/******/ 	
+/******/ 	// startup
+/******/ 	// Load entry module and return exports
+/******/ 	// This entry module doesn't tell about it's top-level declarations so it can't be inlined
+/******/ 	__webpack_require__(988);
+/******/ 	var __webpack_exports__ = __webpack_require__(666);
+/******/ 	
 /******/ })()
 ;

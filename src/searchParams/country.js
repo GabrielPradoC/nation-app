@@ -1,6 +1,6 @@
-import getOpts from "../auxFiles/getOpts.js";
-import {countriesObjArr} from "./countries.js";
+import getOpts from "../helpers/generateOptionElements.js";
+import options from './options.json';
 
-const countryOptElsArr = getOpts(countriesObjArr);
+const optionsArray = getOpts(options.countries);
 
-export default countryOptElsArr;
+export default optionsArray;

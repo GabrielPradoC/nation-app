@@ -1,4 +1,10 @@
-import getOpts from "../auxFiles/getOpts.js";
-import {l as langObjArr}  from"./languages.js";
-const Arr = getOpts(langObjArr);
-export default Arr;
+import getOpts from "../helpers/generateOptionElements.js";
+import options from './options.json';
+
+const optionsArray = getOpts(options.languages.sort(sortLanguages));
+
+function sortLanguages(language1, language2){
+    return language1.name.localeCompare(language2.name, 'en', { sensitivity: 'base' });
+}
+
+export default optionsArray;
