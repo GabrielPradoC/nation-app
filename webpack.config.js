@@ -29,6 +29,10 @@ module.exports = {
           'css-loader',
         ],
       },
+      { 
+        test: /\.ts$/,
+        use: 'ts-loader'
+      },
     ],
   },
   plugins: [
